@@ -1,0 +1,274 @@
+#!/bin/bash
+
+if [[ -f $HOME/.zshrc ]]; then source $HOME/.zshrc; fi
+
+mkdir -p macenv/secrets
+
+echo "checking for app store updates"
+if [[ -z $(softwareupdate -l 2>&1 | grep "No new software available.") ]]; then
+  echo "Installing software updates:"
+  sudo softwareupdate --install --all --restart
+  #wait to confirm a restart wasn't needed
+  read -p "Press any key to continue... " -n1 -s
+  #has xcode been updated and we need to reaccept the license?
+  if [[ -n $(/usr/bin/xcrun clang 2>&1 | grep "license") ]]; then
+    sudo xcodebuild -license
+  fi
+fi
+
+if [[ -z $(which brew) ]]; then
+  echo "installing homebrew"
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+fi
+
+echo "update homebrew apps"
+  # Make sure we’re using the latest Homebrew
+  brew update --verbose
+  brew doctor
+  # Upgrade any already installed formulae
+  brew outdated
+  brew upgrade
+  if [[ -z $(brew list | grep wget) ]]; then
+    brew install wget
+    brew tap Homebrew/bundle
+  fi
+  wget -nv https://raw.githubusercontent.com/damonmorgan/work-env/master/Brewfile -O $HOME/macenv/Brewfile
+  cd $HOME/macenv
+  brew bundle --verbose
+  # Remove outdated versions from the cellar
+  brew cleanup
+
+if [ $SHELL != $(which zsh) ] && [[ -z $(sudo cat /etc/shells | grep $(which zsh)) ]]; then
+  echo "add homebrew zsh to shells"
+  sudo sh -c "echo $(which zsh) >> /etc/shells"
+fi
+
+if [[ -z $(pgrep -f colima) ]]; then
+  echo "docker containers"
+  mkdir -p ~/.docker/cli-plugins
+  ln -sfn /opt/homebrew/opt/docker-compose/bin/docker-compose ~/.docker/cli-plugins/docker-compose
+  colima start
+fi
+wget -nv https://raw.githubusercontent.com/damonmorgan/work-env/master/docker-compose.yml -O $HOME/macenv/docker-compose.yml
+cd $HOME/macenv
+docker-compose pull
+docker-compose up -d
+docker system prune --force --all
+docker volume prune --force
+
+echo "checking for SSH key, try to restore from secrets if it doesn't exist..."
+  wget -nv https://raw.githubusercontent.com/damonmorgan/work-env/master/Rakefile -O $HOME/macenv/Rakefile
+  wget -nv https://raw.githubusercontent.com/damonmorgan/work-env/master/secrets/secrets.rake -O $HOME/macenv/secrets/secrets.rake
+  cd $HOME/macenv
+  if [[ ! -f $HOME/.ssh/id_rsa.pub ]]; then
+    # it's likely that both history files have been recently created as part of the install process, but we want to
+    # overwrite them with the backed up versions that will have an 'older' timestamp
+    rm $HOME/.psql_history
+    rm $HOME/.zsh_history
+    rake secrets:install
+  else
+    rake secrets:backup
+  fi
+
+echo "checking for SSH key, generating one if it doesn't exist and add to github ..."
+  if [[ ! -f $HOME/.ssh/id_rsa.pub ]]; then
+    ssh-keygen -t rsa -b 4096
+    cat $HOME/.ssh/id_rsa.pub | pbcopy
+    open https://github.com/account/ssh
+    read -p "Press any key once you have pasted into your Github account..." -n1 -s
+  fi
+
+if [[ ! -f $HOME/.dotfiles/zshrc ]]; then
+  echo "install dotfiles"
+  git clone git@github.com:damonmorgan/dotfiles.git $HOME/.dotfiles
+  cd $HOME/.dotfiles
+  rake install
+fi
+
+echo "docker zsh completions"
+  if [[ ! -d $HOME/.zsh/completions ]]; then
+    cd $HOME/.zsh
+    mkdir completions
+  fi
+  wget -nv https://raw.githubusercontent.com/docker/cli/master/contrib/completion/zsh/_docker -O $HOME/.zsh/completions/_docker
+  wget -nv https://raw.githubusercontent.com/docker/machine/master/contrib/completion/zsh/_docker-machine -O $HOME/.zsh/completions/_docker-machine
+  wget -nv https://raw.githubusercontent.com/docker/compose/master/contrib/completion/zsh/_docker-compose -O $HOME/.zsh/completions/_docker-compose
+
+# http://stackoverflow.com/questions/13762280/zsh-compinit-insecure-directories
+echo "fix permissions for zsh completions"
+  compaudit | xargs chmod go-w
+  rm -f $HOME/.zcompdump*; compinit
+
+echo "heroku plugins"
+  if [[ -z $(/opt/homebrew/bin/heroku plugins | grep 'heroku-pg-extras') ]]; then
+    /opt/homebrew/bin/heroku plugins:install heroku-pg-extras
+    heroku autocomplete
+  else
+    /opt/homebrew/bin/heroku update
+  fi
+
+echo "vim Vundle"
+  if [[ ! -d $HOME/.vim/bundle/Vundle.vim ]]; then
+    git clone https://github.com/VundleVim/Vundle.vim.git $HOME/.vim/bundle/Vundle.vim
+    vim +PluginInstall +qall
+  else
+    vundle-update
+  fi
+
+if [[ ! -f $HOME/.vim/bundle/command-t/ruby/command-t/ext/command-t/metadata.rb ]]; then
+  echo "build Command-T plugin"
+  cd $HOME/.vim/bundle/command-t
+  rake make
+fi
+
+if [[ ! -d $HOME/development ]]; then
+  echo "create development directory"
+  cd $HOME
+  mkdir development
+fi
+
+if [[ ! -d $HOME/development/snipmate-snippets ]]; then
+  echo "install snippets"
+  git clone https://github.com/scrooloose/snipmate-snippets.git $HOME/development/snipmate-snippets
+  sed -i -e 's/snipmate/snipmate.vim/g' $HOME/development/snipmate-snippets/Rakefile
+  cd $HOME/development/snipmate-snippets
+  rake deploy_local
+fi
+
+if [[ ! -d $HOME/development/solarized ]]; then
+  echo "better colour scheme for terminals"
+  git clone https://github.com/altercation/solarized.git $HOME/development/solarized
+  open "$HOME/development/solarized/iterm2-colors-solarized/Solarized Dark.itermcolors"
+  read -p "Press any key to continue... " -n1 -s
+fi
+
+if [[ -z $(defaults read com.googlecode.iterm2 | grep 'd326c889-7564-409b-8b26-d3671001617e') ]]; then
+  echo "configure iTerm"
+  defaults write com.googlecode.iterm2 PromptOnQuit -bool false
+  defaults write com.googlecode.iterm2 SUEnableAutomaticChecks -bool true
+  wget -nv https://raw.githubusercontent.com/damonmorgan/work-env/master/iTerm2/DynamicProfiles/inconsolarized.json -O $HOME/Library/Application\ Support/iTerm2/DynamicProfiles/inconsolarized.json
+  defaults write com.googlecode.iterm2 "Default Bookmark Guid" "d326c889-7564-409b-8b26-d3671001617e"
+fi
+
+echo "latest ruby"
+  source $(brew --prefix chruby)/share/chruby/chruby.sh
+  source $(brew --prefix chruby)/share/chruby/auto.sh
+  cd $HOME/development
+  ruby_latest_version="$(curl -q -s https://raw.githubusercontent.com/postmodern/ruby-versions/master/ruby/stable.txt | tail -1)"
+  ruby_current_version="$(cat .ruby-version)"
+  if [[ $ruby_latest_version = $ruby_current_version ]]; then
+    echo "Latest ruby installed - Updating rubygems"
+    gem update --system --no-document
+    gem update bundler
+    gem clean
+  else
+    ruby-install "ruby $ruby_latest_version" -- --disable-install-rdoc
+    rm -rf $HOME/src
+    rm -rf $HOME/.rubies/ruby-$ruby_current_version
+    rm -rf $HOME/.gem/ruby/$ruby_current_version
+    echo "$ruby_latest_version" > .ruby-version
+    source $(brew --prefix chruby)/share/chruby/chruby.sh
+    source $(brew --prefix chruby)/share/chruby/auto.sh
+    cd $HOME
+    cd $HOME/development
+    chruby "$ruby_latest_version"
+    gem update --system --no-document
+    gem clean
+    gem install bundler --no-document
+  fi
+
+echo "set macos preferences"
+# from ~/.osx — http://mths.be/osx
+
+###############################################################################
+# General UI/UX                                                               #
+###############################################################################
+
+echo "Disable the sound effects on boot"
+sudo nvram SystemAudioVolume=" "
+
+echo "Expand save panel by default"
+defaults write NSGlobalDomain NSNavPanelExpandedStateForSaveMode -bool true
+defaults write NSGlobalDomain NSNavPanelExpandedStateForSaveMode2 -bool true
+
+echo "Expand print panel by default"
+defaults write NSGlobalDomain PMPrintingExpandedStateForPrint -bool true
+defaults write NSGlobalDomain PMPrintingExpandedStateForPrint2 -bool true
+
+echo "Save to disk (not to iCloud) by default"
+defaults write NSGlobalDomain NSDocumentSaveNewDocumentsToCloud -bool false
+
+echo "Automatically quit printer app once the print jobs complete"
+defaults write com.apple.print.PrintingPrefs "Quit When Finished" -bool true
+
+echo "Disable Photos.app from starting everytime a device is plugged in"
+defaults -currentHost write com.apple.ImageCapture disableHotPlug -bool true
+
+###############################################################################
+# Mouse and trackpad                                                          #
+###############################################################################
+
+echo "Turn on bluetooth mouse secondary click"
+defaults write com.apple.driver.AppleBluetoothMultitouch.mouse MouseButtonMode TwoButton
+
+echo "Turn on trackpad App Expose"
+defaults write com.apple.dock showAppExposeGestureEnabled -bool true
+
+###############################################################################
+# Screen                                                                      #
+###############################################################################
+
+echo "Require password immediately after sleep or screen saver begins"
+defaults write com.apple.screensaver askForPassword -int 1
+defaults write com.apple.screensaver askForPasswordDelay -int 0
+
+###############################################################################
+# Finder                                                                      #
+###############################################################################
+
+echo "Finder: show status bar"
+defaults write com.apple.finder ShowStatusBar -bool true
+
+echo "When performing a search, search the current folder by default"
+defaults write com.apple.finder FXDefaultSearchScope -string "SCcf"
+
+echo "Disable the warning when changing a file extension"
+defaults write com.apple.finder FXEnableExtensionChangeWarning -bool false
+
+echo "Avoid creating .DS_Store files on network or USB volumes"
+defaults write com.apple.desktopservices DSDontWriteNetworkStores -bool true
+defaults write com.apple.desktopservices DSDontWriteUSBStores -bool true
+
+echo "Set Downloads as the default location for new Finder windows"
+defaults write com.apple.finder NewWindowTarget -string "PfLo"
+defaults write com.apple.finder NewWindowTargetPath -string "file://${HOME}/Downloads/"
+
+###############################################################################
+# TextEdit
+###############################################################################
+
+echo "plain text default for TextEdit"
+defaults write com.apple.TextEdit RichText -int 0
+
+###############################################################################
+# Dock, Dashboard, and hot corners                                            #
+###############################################################################
+
+echo "Set the icon size of Dock items to 46 pixels"
+defaults write com.apple.dock tilesize -int 46
+
+###############################################################################
+# Time Machine                                                                #
+###############################################################################
+
+echo "Prevent Time Machine from prompting to use new hard drives as backup volume"
+defaults write com.apple.TimeMachine DoNotOfferNewDisksForBackup -bool true
+
+# list casks that are outdated
+echo ""
+echo "####################### Outdated Casks ######################"
+brew outdated --cask
+echo "#############################################################"
+echo ""
+
+echo "Done. Note that some of these changes require a logout/restart to take effect."
